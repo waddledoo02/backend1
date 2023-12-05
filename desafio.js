@@ -1,177 +1,86 @@
 const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const exphbs = require('express-handlebars');
 const fs = require('fs/promises');
 
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server);
 const PORT = 8080;
 
 app.use(express.json());
+app.use(express.static('public')); // Puedes agregar un directorio public para tus archivos estáticos
 
-// Manejo de productos
-const productsRouter = express.Router();
+// Configurar Handlebars
+app.engine('handlebars', exphbs());
+app.set('view engine', 'handlebars');
+app.set('views', './views'); // Asegúrate de tener un directorio 'views' en tu proyecto
 
-productsRouter.get('/', async (req, res) => {
-    try {
-        const limit = parseInt(req.query.limit);
-        const products = await getProducts();
-        res.json(limit ? products.slice(0, limit) : products);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al obtener productos' });
-    }
+// WebSockets
+io.on('connection', (socket) => {
+    console.log('Usuario conectado');
+
+    // Emitir lista de productos al cliente cuando se conecta
+    socket.emit('products', getProducts());
+
+    // Escuchar eventos desde el cliente
+    socket.on('newProduct', async (newProduct) => {
+        // Procesar la creación de un nuevo producto
+        await addProduct(newProduct);
+        // Actualizar la lista de productos y emitir a todos los clientes
+        io.emit('products', await getProducts());
+    });
+
+    socket.on('deleteProduct', async (productId) => {
+        // Procesar la eliminación de un producto
+        await deleteProduct(productId);
+        // Actualizar la lista de productos y emitir a todos los clientes
+        io.emit('products', await getProducts());
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Usuario desconectado');
+    });
 });
 
-productsRouter.get('/:pid', async (req, res) => {
-    try {
-        const productId = parseInt(req.params.pid);
-        const products = await getProducts();
-        const product = products.find((p) => p.id === productId);
-        if (product) {
-            res.json(product);
-        } else {
-            res.status(404).json({ error: 'Producto no encontrado' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: 'Error al obtener producto' });
-    }
+// Vista con Handlebars para la lista de productos en tiempo real
+app.get('/realtimeproducts', async (req, res) => {
+    const products = await getProducts();
+    res.render('realTimeProducts', { products });
 });
 
-productsRouter.post('/', async (req, res) => {
-    try {
-        const newProduct = req.body;
-        const products = await getProducts();
-        newProduct.id = generateUniqueId(products);
-        products.push(newProduct);
-        await saveProducts(products);
-        res.json(newProduct);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al agregar producto' });
-    }
+// Vista con Handlebars para la lista de productos estática
+app.get('/', async (req, res) => {
+    const products = await getProducts();
+    res.render('home', { products });
 });
-
-productsRouter.put('/:pid', async (req, res) => {
-    try {
-        const productId = parseInt(req.params.pid);
-        const updates = req.body;
-        const products = await getProducts();
-        const productIndex = products.findIndex((p) => p.id === productId);
-        if (productIndex === -1) {
-            throw new Error('Producto no encontrado');
-        }
-        products[productIndex] = { ...products[productIndex], ...updates };
-        await saveProducts(products);
-        res.json(products[productIndex]);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al actualizar producto' });
-    }
-});
-
-productsRouter.delete('/:pid', async (req, res) => {
-    try {
-        const productId = parseInt(req.params.pid);
-        const products = await getProducts();
-        const filteredProducts = products.filter((p) => p.id !== productId);
-        if (filteredProducts.length === products.length) {
-            throw new Error('Producto no encontrado');
-        }
-        await saveProducts(filteredProducts);
-        res.json({ message: 'Producto eliminado correctamente' });
-    } catch (error) {
-        res.status(500).json({ error: 'Error al eliminar producto' });
-    }
-});
-
-app.use('/api/products', productsRouter);
-
-// Manejo de carritos
-const cartsRouter = express.Router();
-
-cartsRouter.post('/', async (req, res) => {
-    try {
-        const newCart = {
-            id: generateUniqueId(await getCarts()),
-            products: [],
-        };
-        const carts = await getCarts();
-        carts.push(newCart);
-        await saveCarts(carts);
-        res.json(newCart);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al crear carrito' });
-    }
-});
-
-cartsRouter.get('/:cid', async (req, res) => {
-    try {
-        const cartId = req.params.cid;
-        const carts = await getCarts();
-        const cart = carts.find((c) => c.id === cartId);
-        if (cart) {
-            res.json(cart.products);
-        } else {
-            res.status(404).json({ error: 'Carrito no encontrado' });
-        }
-    } catch (error) {
-        res.status(500).json({ error: 'Error al obtener carrito' });
-    }
-});
-
-cartsRouter.post('/:cid/product/:pid', async (req, res) => {
-    try {
-        const cartId = req.params.cid;
-        const productId = req.params.pid;
-        const quantity = req.body.quantity || 1;
-
-        const carts = await getCarts();
-        const products = await getProducts();
-
-        const cartIndex = carts.findIndex((c) => c.id === cartId);
-        if (cartIndex === -1) {
-            throw new Error('Carrito no encontrado');
-        }
-
-        const productIndex = products.findIndex((p) => p.id == productId);
-        if (productIndex === -1) {
-            throw new Error('Producto no encontrado');
-        }
-
-        const existingProduct = carts[cartIndex].products.find(
-            (p) => p.product === productId
-        );
-
-        if (existingProduct) {
-            existingProduct.quantity += quantity;
-        } else {
-            carts[cartIndex].products.push({
-                product: productId,
-                quantity: quantity,
-            });
-        }
-
-        await saveCarts(carts);
-        res.json(carts[cartIndex]);
-    } catch (error) {
-        res.status(500).json({ error: 'Error al agregar producto al carrito' });
-    }
-});
-
-app.use('/api/carts', cartsRouter);
 
 // Funciones auxiliares
 async function getProducts() {
-    const data = await fs.readFile('productos.json', 'utf8');
-    return JSON.parse(data);
+    try {
+        const data = await fs.readFile('productos.json', 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        return [];
+    }
 }
 
 async function saveProducts(products) {
     await fs.writeFile('productos.json', JSON.stringify(products), 'utf8');
 }
 
-async function getCarts() {
-    const data = await fs.readFile('carrito.json', 'utf8');
-    return JSON.parse(data);
+async function addProduct(newProduct) {
+    const products = await getProducts();
+    newProduct.id = generateUniqueId(products);
+    products.push(newProduct);
+    await saveProducts(products);
 }
 
-async function saveCarts(carts) {
-    await fs.writeFile('carrito.json', JSON.stringify(carts), 'utf8');
+async function deleteProduct(productId) {
+    const products = await getProducts();
+    const filteredProducts = products.filter((p) => p.id !== productId);
+    await saveProducts(filteredProducts);
 }
 
 function generateUniqueId(items) {
@@ -183,6 +92,6 @@ function generateUniqueId(items) {
     return newId;
 }
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
